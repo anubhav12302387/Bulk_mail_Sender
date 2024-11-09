@@ -2,84 +2,114 @@ const nodemailer = require('nodemailer');
 const fs = require('fs');
 const { parse } = require('csv-parse');
 const readline = require('readline');
+const QRCode = require('qrcode');
+require('dotenv').config();
 
 const rl = readline.createInterface({
-    input: process.stdin,
-    output: process.stdout
+  input: process.stdin,
+  output: process.stdout
 });
 
 async function readCSV(filename) {
+  try {
     const records = [];
     const parser = fs
-        .createReadStream(filename)
-        .pipe(parse({ columns: true }));
+      .createReadStream(filename)
+      .pipe(parse({ columns: true }));
 
     for await (const record of parser) {
-        records.push(record.email);
+      records.push({
+        name: record.name,
+        email: record.email
+      });
     }
     return records;
+  } catch (error) {
+    console.error("Error reading CSV file:", error.message);
+    return [];
+  }
 }
 
-async function sendEmail(transporter, from, to, subject, body) {
-    try {
-        await transporter.sendMail({
-            from,
-            to,
-            subject,
-            text: body
-        });
-        console.log(`✓ Email sent successfully to ${to}`);
-        return true;
-    } catch (error) {
-        console.error(`✗ Failed to send email to ${to}:`, error.message);
-        return false;
-    }
+async function generateQRCode(email) {
+  const qrPath = `qr_${Date.now()}.png`;
+  try {
+    await QRCode.toFile(qrPath, email);
+    return qrPath;
+  } catch (error) {
+    console.error("Error generating QR Code:", error.message);
+    throw error;
+  }
+}
+
+async function sendEmail(transporter, from, recipient, subject, htmlContent) {
+  try {
+    const qrPath = await generateQRCode(recipient.email);
+
+    await transporter.sendMail({
+      from,
+      to: recipient.email,
+      subject,
+      html: htmlContent,
+      attachments: [{
+        filename: 'qr.png',
+        path: qrPath,
+        cid: 'qr'
+      }]
+    });
+
+    fs.unlinkSync(qrPath); // Clean up QR code file after sending
+    console.log(`✓ Email sent successfully to ${recipient.name} (${recipient.email})`);
+    return true;
+  } catch (error) {
+    console.error(`✗ Failed to send email to ${recipient.name} (${recipient.email}):`, error.message);
+    return false;
+  }
 }
 
 async function main() {
-    // Get user input
-    const credentials = await new Promise((resolve) => {
-      rl.question('Enter your email: ', (email) => {
-        rl.question('Enter your app password: ', (password) => {
-          rl.question('Enter email subject: ', (subject) => {
-            resolve({ email, password, subject });
-          });
-        });
-      });
+  const credentials = await new Promise((resolve) => {
+    rl.question('Enter email subject: ', (subject) => {
+      resolve({ subject });
     });
+  });
 
-    // Create transporter
-    const transporter = nodemailer.createTransport({
-        service: 'gmail',
-        auth: {
-            user: credentials.email,
-            pass: credentials.password
-        }
-    });
-
-    // Read email template
-    const emailBody = fs.readFileSync('rmail_template.txt', 'utf8');
-
-    // Read recipients
-    const recipients = await readCSV('excel.csv');
-
-    // Send emails
-    let successful = 0;
-    for (const recipient of recipients) {
-        if (await sendEmail(
-            transporter,
-            credentials.email,
-            recipient,
-            credentials.subject,
-            emailBody
-        )) {
-            successful++;
-        }
+  const transporter = nodemailer.createTransport({
+    service: 'gmail',
+    auth: {
+      user: process.env.EMAIL_USER,
+      pass: process.env.EMAIL_PASS
     }
+  });
 
-    console.log(`\nSummary: Sent ${successful} out of ${recipients.length} emails successfully`);
-    rl.close();
-    process.exit();
+  let emailTemplate;
+  try {
+    emailTemplate = fs.readFileSync('invitetemplte.HTML', 'utf8');
+  } catch (error) {
+    console.error("Error reading email template:", error.message);
+    return;
+  }
+
+  const recipients = await readCSV('excel.csv');
+  let successful = 0;
+
+  for (const recipient of recipients) {
+    const personalizedHtml = emailTemplate
+      .replace('${name}', recipient.name)
+      .replace('${email}', recipient.email);
+
+    if (await sendEmail(
+      transporter,
+      process.env.EMAIL_USER,
+      recipient,
+      credentials.subject,
+      personalizedHtml
+    )) {
+      successful++;
+    }
+  }
+
+  console.log(`\nSummary: Sent ${successful} out of ${recipients.length} emails successfully`);
+  rl.close();
 }
 
-main().catch(error => console.error('Error in main:', error.message));
+main().catch(console.error);

@@ -1,0 +1,6 @@
+Dear Recipient,
+
+This is a test email sent from our email server.
+
+Best regards,
+Your Name
